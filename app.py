@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 import analysis
+import backtest
 import config
 import db
 import optimize
@@ -48,6 +49,8 @@ def compute_analysis(
     max_weight: float,
     crypto_cap: float,
     cov_method: str,
+    return_method: str,
+    denoise: bool,
     data_version: int,
 ):
     """Load prices, optimize with constraints, and build the dashboard figures.
@@ -71,6 +74,8 @@ def compute_analysis(
         max_weight=max_weight,
         crypto_cap=crypto_cap,
         cov_method=cov_method,
+        return_method=return_method,
+        denoise=denoise,
     )
     figures = {
         "frontier": plot.build_frontier_montecarlo(result, current_weights=current_weights),
@@ -85,6 +90,26 @@ def compute_analysis(
     primary = result.max_sharpe or result.min_volatility
     downside = optimize.downside_metrics(prices, primary.weights, freq, rf)
     return result, figures, downside
+
+
+@st.cache_data(show_spinner=False)
+def run_backtest(
+    tickers: tuple[str, ...],
+    freq: int,
+    rf: float,
+    lookback_days: int,
+    rebalance_days: int,
+    data_version: int,
+):
+    """Walk-forward backtest, cached by inputs (re-optimization is expensive)."""
+    conn = db.connect(check_same_thread=False)
+    prices = db.load_prices(conn, tickers=list(tickers))
+    conn.close()
+    if prices.empty:
+        return None
+    return backtest.walk_forward(
+        prices, lookback_days, rebalance_days, frequency=freq, risk_free_rate=rf
+    )
 
 
 def bump_data_version() -> None:
@@ -106,7 +131,13 @@ def ensure_seed(conn) -> None:
 def portfolio_comparison(result) -> pd.DataFrame:
     """Return a tidy comparison table of the solved portfolios."""
     rows = []
-    for portfolio in (result.max_sharpe, result.min_volatility, result.hrp):
+    for portfolio in (
+        result.max_sharpe,
+        result.min_volatility,
+        result.hrp,
+        result.min_cvar,
+        result.min_semivariance,
+    ):
         if portfolio is None:
             continue
         rows.append(
@@ -115,6 +146,9 @@ def portfolio_comparison(result) -> pd.DataFrame:
                 "Rendite p.a.": analysis.fmt_pct(portfolio.expected_return, signed=True),
                 "Volatilitaet p.a.": analysis.fmt_pct(portfolio.volatility),
                 "Sharpe": analysis._de(portfolio.sharpe, 2),
+                "Tail (CVaR/Semi)": "-"
+                if portfolio.tail_metric is None
+                else analysis._de(portfolio.tail_metric, 4),
             }
         )
     return pd.DataFrame(rows)
@@ -165,6 +199,21 @@ with st.sidebar:
         help="Ledoit-Wolf = robuste Schrumpfung. EW = juengere Daten zaehlen mehr.",
     )
     cov_method = "exp_cov" if cov_label.startswith("Exp") else "ledoit_wolf"
+
+    return_label = st.radio(
+        "Renditeschaetzer",
+        ["Mean Historical", "EMA", "CAPM"],
+        help="mu ist die instabilste Markowitz-Zutat. EMA gewichtet juengere Daten, "
+        "CAPM nutzt Gleichgewichtsrenditen.",
+    )
+    return_method = {"Mean Historical": "mean_historical", "EMA": "ema", "CAPM": "capm"}[
+        return_label
+    ]
+    denoise = st.checkbox(
+        "Kovarianz denoisen (RMT)",
+        value=False,
+        help="Filtert Rausch-Eigenwerte der Korrelationsmatrix (Marchenko-Pastur).",
+    )
 
     st.divider()
     if st.button("Aktualisieren", width="stretch", type="primary"):
@@ -323,6 +372,8 @@ else:
         max_weight,
         crypto_cap,
         cov_method,
+        return_method,
+        denoise,
         st.session_state.data_version,
     )
 
@@ -337,12 +388,19 @@ else:
                 "Caps zu eng). Kennzahlen unten beziehen sich auf Min Volatility."
             )
 
-        tab_front, tab_corr, tab_risk, tab_rebal = st.tabs(
-            ["Frontier & Gewichte", "Korrelation", "Risiko", "Rebalancing"]
+        tab_front, tab_corr, tab_risk, tab_rebal, tab_bt = st.tabs(
+            ["Frontier & Gewichte", "Korrelation", "Risiko", "Rebalancing", "Backtest"]
         )
 
         with tab_front:
-            st.dataframe(portfolio_comparison(result), hide_index=True, width="stretch")
+            comparison = portfolio_comparison(result)
+            st.dataframe(comparison, hide_index=True, width="stretch")
+            st.download_button(
+                "Vergleich als CSV",
+                comparison.to_csv(index=False).encode("utf-8"),
+                file_name="portfolios.csv",
+                mime="text/csv",
+            )
             left, right = st.columns(2)
             left.plotly_chart(figures["frontier"], width="stretch")
             right.plotly_chart(figures["weights"], width="stretch")
@@ -368,11 +426,19 @@ else:
         with tab_rebal:
             options = {
                 p.name: p
-                for p in (result.max_sharpe, result.min_volatility, result.hrp)
+                for p in (
+                    result.max_sharpe,
+                    result.min_volatility,
+                    result.hrp,
+                    result.min_cvar,
+                    result.min_semivariance,
+                )
                 if p is not None
             }
             choice = st.radio("Ziel-Portfolio", list(options.keys()), horizontal=True)
             target = options[choice]
+
+            st.markdown("**Rebalancing bestehender Holdings**")
             if total_holdings <= 0:
                 st.info("Trage oben deine Holdings ein, um Rebalancing zu berechnen.")
             else:
@@ -393,3 +459,78 @@ else:
                 )
                 st.caption(f"Gesamtwert: {analysis.fmt_usd(total)} (bleibt konstant)")
                 st.dataframe(table, hide_index=True, width="stretch")
+                st.download_button(
+                    "Rebalancing als CSV",
+                    table.to_csv(index=False).encode("utf-8"),
+                    file_name="rebalancing.csv",
+                    mime="text/csv",
+                )
+
+            st.divider()
+            st.markdown("**Neues Kapital investieren**")
+            capital = st.number_input(
+                "Neues Kapital ($)", value=1000.0, min_value=0.0, step=100.0,
+                key="new_capital",
+            )
+            if capital > 0:
+                alloc_rows, leftover = optimize.allocate_capital(
+                    target.weights, latest, capital, asset_types
+                )
+                alloc_table = pd.DataFrame(
+                    [
+                        {
+                            "Ticker": r["ticker"],
+                            "Ziel %": analysis.fmt_pct(r["target_weight"]),
+                            "Kaufen (Stueck/Coins)": analysis._de(r["units"], 4),
+                            "Wert": analysis.fmt_usd(r["value"]),
+                        }
+                        for r in alloc_rows
+                    ]
+                )
+                st.dataframe(alloc_table, hide_index=True, width="stretch")
+                st.caption(f"Nicht investierter Rest: {analysis.fmt_usd(leftover)}")
+
+        with tab_bt:
+            st.markdown(
+                "Walk-forward: rollierend auf einem Fenster optimieren, out-of-sample "
+                "halten, gegen Equal-Weight und Buy&Hold-BTC vergleichen."
+            )
+            bt_c1, bt_c2 = st.columns(2)
+            bt_lookback = int(
+                bt_c1.number_input(
+                    "Lookback (Tage)", value=180, min_value=30, step=30, key="bt_lookback"
+                )
+            )
+            bt_rebalance = int(
+                bt_c2.number_input(
+                    "Rebalance alle (Tage)", value=30, min_value=5, step=5, key="bt_rebalance"
+                )
+            )
+            if st.button("Backtest laufen", type="primary"):
+                try:
+                    with st.spinner("Backtest laeuft ..."):
+                        st.session_state.backtest_result = run_backtest(
+                            tuple(tickers), freq, rf, bt_lookback, bt_rebalance,
+                            st.session_state.data_version,
+                        )
+                except ValueError as exc:
+                    st.session_state.backtest_result = None
+                    st.error(str(exc))
+
+            bt_outcome = st.session_state.get("backtest_result")
+            if bt_outcome is not None:
+                curves, stats = bt_outcome
+                st.plotly_chart(plot.build_backtest_curves(curves), width="stretch")
+                disp = pd.DataFrame(
+                    {
+                        "Strategie": stats["Strategie"],
+                        "Rendite p.a.": stats["Rendite p.a."].map(
+                            lambda v: analysis.fmt_pct(v, signed=True)
+                        ),
+                        "Vola p.a.": stats["Vola p.a."].map(analysis.fmt_pct),
+                        "Sharpe": stats["Sharpe"].map(lambda v: analysis._de(v, 2)),
+                        "Max Drawdown": stats["Max Drawdown"].map(analysis.fmt_pct),
+                        "Endwert": stats["Endwert"].map(lambda v: analysis._de(v, 2)),
+                    }
+                )
+                st.dataframe(disp, hide_index=True, width="stretch")

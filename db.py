@@ -57,14 +57,17 @@ ASSET_COLS = "ticker, name, asset_type, coingecko_id, active"
 
 
 def connect(
-    db_path: str = config.DB_PATH,
+    db_path: str | None = None,
     check_same_thread: bool = True,
 ) -> sqlite3.Connection:
     """Open a connection, creating the folder, schema and migrations if needed.
 
-    Pass check_same_thread=False for Streamlit, which may touch the connection
-    from different threads across reruns.
+    Reads config.DB_PATH at call time when db_path is None (so tests can point
+    it elsewhere). Pass check_same_thread=False for Streamlit, which may touch
+    the connection from different threads across reruns.
     """
+    if db_path is None:
+        db_path = config.DB_PATH
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)

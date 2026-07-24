@@ -167,3 +167,59 @@ def test_rebalance_conserves_total_and_hits_target():
     for row in rows:
         new_value = row["current_value"] + row["delta_value"]
         assert abs(new_value - target[row["ticker"]] * total) < 1e-6
+
+
+def test_return_estimators_differ():
+    prices = _synthetic_prices()
+    mean = optimize.compute_inputs(prices, frequency=365, return_method="mean_historical")[0]
+    ema = optimize.compute_inputs(prices, frequency=365, return_method="ema")[0]
+    capm = optimize.compute_inputs(prices, frequency=365, return_method="capm")[0]
+    assert not np.allclose(mean.values, ema.values)
+    assert not np.allclose(mean.values, capm.values)
+
+
+def test_denoise_covariance_changes_matrix_and_stays_psd():
+    prices = _synthetic_prices()
+    _, cov, _ = optimize.compute_inputs(prices, frequency=365)
+    denoised = optimize.denoise_covariance(cov, n_samples=len(prices.dropna()))
+
+    assert not np.allclose(cov.values, denoised.values)
+    assert np.linalg.eigvalsh(denoised.values).min() > -1e-8  # still PSD
+    # Variances (diagonal) are preserved.
+    assert np.allclose(np.diag(cov.values), np.diag(denoised.values), atol=1e-8)
+
+
+def test_min_cvar_and_semivariance_are_valid_and_capped():
+    prices = _mixed_prices()
+    mu, cov, freq = optimize.compute_inputs(prices, frequency=252)
+    returns = optimize.align_prices(prices).pct_change().dropna()
+
+    cvar = optimize.min_cvar(mu, returns, cov, max_weight=0.4)
+    semi = optimize.min_semivariance(mu, returns, cov, freq, max_weight=0.4)
+
+    for portfolio in (cvar, semi):
+        assert abs(sum(portfolio.weights.values()) - 1.0) < 1e-3
+        assert all(w >= -1e-6 for w in portfolio.weights.values())
+        assert max(portfolio.weights.values()) <= 0.4 + 1e-3
+        assert portfolio.tail_metric is not None
+
+
+def test_run_populates_cvar_and_semivariance():
+    result = optimize.run(_synthetic_prices())
+    assert result.min_cvar is not None
+    assert result.min_semivariance is not None
+
+
+def test_allocate_capital_whole_shares_and_leftover():
+    target = {"BTC-USD": 0.5, "AAPL": 0.5}
+    prices = {"BTC-USD": 60000.0, "AAPL": 200.0}
+    types = {"BTC-USD": "crypto", "AAPL": "stock"}
+
+    rows, leftover = optimize.allocate_capital(target, prices, 10000.0, types)
+    by_ticker = {r["ticker"]: r for r in rows}
+
+    # Stock is whole shares: 0.5*10000 / 200 = 25 exactly.
+    assert by_ticker["AAPL"]["units"] == 25.0
+    # Crypto is fractional.
+    assert abs(by_ticker["BTC-USD"]["units"] - (5000.0 / 60000.0)) < 1e-9
+    assert leftover >= -1e-9

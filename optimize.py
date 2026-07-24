@@ -269,7 +269,7 @@ def min_cvar(
     Scored with performance_of on the same mu/cov as the others (so it plots on
     the shared axis); the native annual CVaR is kept in tail_metric.
     """
-    ec = EfficientCVaR(mu, returns, beta=beta, weight_bounds=(0, 1))
+    ec = EfficientCVaR(mu, returns, beta=beta, weight_bounds=(0, 1), solver="CLARABEL")
     _apply_caps(ec, len(mu), max_weight, sector_mapper, crypto_cap)
     ec.min_cvar()
     weights = dict(ec.clean_weights())
@@ -292,7 +292,9 @@ def min_semivariance(
     Only penalizes returns below the benchmark, unlike variance. Scored with
     performance_of; native semi-deviation kept in tail_metric.
     """
-    es = EfficientSemivariance(mu, returns, frequency=frequency, weight_bounds=(0, 1))
+    es = EfficientSemivariance(
+        mu, returns, frequency=frequency, weight_bounds=(0, 1), solver="CLARABEL"
+    )
     _apply_caps(es, len(mu), max_weight, sector_mapper, crypto_cap)
     es.min_semivariance()
     weights = dict(es.clean_weights())

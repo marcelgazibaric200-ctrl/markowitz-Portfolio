@@ -36,19 +36,24 @@ A dark dashboard where you can:
 - Enter your real holdings per asset (coins, USD or percent) in an editable table.
   Your current portfolio is then drawn on the frontier and drives the rebalancing.
 - Cap the weight of any single asset (e.g. BTC) and the combined crypto weight,
-  and switch the covariance estimator between Ledoit-Wolf and exponentially
-  weighted. All constraints feed the optimizer live.
+  switch the covariance estimator (Ledoit-Wolf / exponentially weighted) and the
+  return estimator (mean historical / EMA / CAPM), and optionally denoise the
+  covariance with Marchenko-Pastur (RMT). All settings feed the optimizer live.
 - Refresh all prices for the selected portfolio with one button.
 - Explore a quantitative dashboard organised in tabs:
   - **Frontier & Gewichte**: efficient frontier with a Monte Carlo cloud coloured
-    by Sharpe, the Max Sharpe / Min Volatility / **HRP** portfolios and your
-    current holdings marked on it, plus a weights bar and a comparison table.
+    by Sharpe, the **Capital Market Line**, five allocations (Max Sharpe, Min
+    Volatility, **HRP**, **Min CVaR**, **Min Semivariance**) and your current
+    holdings marked on it, a weights bar and a comparison table (CSV export).
   - **Korrelation**: correlation heatmap, a **dendrogram** (the same clustering
     HRP uses), rolling correlation to BTC over time, and a correlation network.
   - **Risiko**: weight vs. risk contribution per asset, and downside metrics
     (Sortino, max drawdown, 95% VaR/CVaR).
   - **Rebalancing**: for a chosen target portfolio, how much to buy/sell per asset
-    in USD and coins to reach the optimal weights.
+    in USD and coins to reach the optimal weights (CSV export), plus a
+    discrete-allocation planner for investing fresh capital.
+  - **Backtest**: walk-forward out-of-sample test of the optimizers against
+    equal-weight and buy & hold BTC, with growth curves and a stats table.
 
 The UI is built for a keyboard without arrow keys: typeable number fields,
 buttons, tabs and an editable table — no sliders.
@@ -71,6 +76,8 @@ Everything is in `config.py`:
 - `MAX_WEIGHT_PER_ASSET` / `MAX_CRYPTO_WEIGHT` are the default constraint caps
   (1.0 = off); the frontend exposes both as number inputs.
 - `COV_METHOD` selects the covariance estimator (`ledoit_wolf` or `exp_cov`).
+- `RETURN_METHOD` selects the expected-returns estimator (`mean_historical`,
+  `ema` or `capm`); `DENOISE_COV` toggles RMT covariance denoising.
 - `CURRENT_PORTFOLIO` optionally plots where you are today on the frontier.
 
 Crypto prices come from a custom CoinGecko client (`fetch/coingecko.py`), stocks
@@ -87,6 +94,12 @@ from `yfinance` (`fetch/stocks.py`).
 - HRP (Hierarchical Risk Parity) is solved separately and is unconstrained by
   design; the per-asset and crypto caps apply to Max Sharpe / Min Volatility and
   the drawn frontier.
+- Min CVaR and Min Semivariance use CVXPY's CLARABEL solver and are scored on the
+  same mean/variance axis as the others for comparison; their native tail metric
+  (annual CVaR / semi-deviation) is shown in the comparison table.
+- The backtest is walk-forward (rolling re-optimization on a trailing window, held
+  out of sample) — no lookahead. Buy & hold BTC and equal weight are the honest
+  benchmarks.
 
 ## Tests
 

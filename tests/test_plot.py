@@ -117,3 +117,43 @@ def test_rolling_correlation_has_traces():
 def test_correlation_network_has_node_trace():
     fig = plot.build_correlation_network(_synthetic_prices(), threshold=0.0)
     assert any(trace.name == "Assets" for trace in fig.data)
+
+
+def test_frontier_has_cvar_semi_points_and_cml():
+    # Upward-trending data so Max Sharpe (and thus the CML) is feasible.
+    rng = np.random.default_rng(1)
+    dates = pd.date_range("2024-01-01", periods=250, freq="D")
+    prices = pd.DataFrame(
+        {
+            "AAA": 100 * np.exp(np.cumsum(rng.normal(0.003, 0.010, 250))),
+            "BBB": 100 * np.exp(np.cumsum(rng.normal(0.002, 0.012, 250))),
+            "CCC": 100 * np.exp(np.cumsum(rng.normal(0.0015, 0.008, 250))),
+        },
+        index=dates,
+    )
+    result = optimize.run(prices)
+    assert result.max_sharpe is not None
+
+    fig = plot.build_frontier_montecarlo(result, n_portfolios=200)
+    names = [trace.name for trace in fig.data]
+    assert "Min CVaR" in names
+    assert "Min Semivariance" in names
+    assert "Capital Market Line" in names
+
+
+def test_weights_bar_includes_cvar_and_semivariance():
+    fig = plot.build_weights_bar(_synthetic_result())
+    names = [trace.name for trace in fig.data]
+    assert "Min CVaR" in names
+    assert "Min Semivariance" in names
+
+
+def test_backtest_curves_figure():
+    import backtest
+
+    curves, _ = backtest.walk_forward(
+        _synthetic_prices(), lookback_days=120, rebalance_days=30, frequency=365
+    )
+    fig = plot.build_backtest_curves(curves)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == len(curves.columns)
