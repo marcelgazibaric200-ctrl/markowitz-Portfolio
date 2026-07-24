@@ -1,0 +1,10 @@
+# Core dependencies for the Markowitz portfolio optimizer.
+# Pinned to the versions installed against Python 3.14.
+PyPortfolioOpt==1.6.0
+yfinance==1.5.1
+plotly==6.9.0
+pandas==3.0.3
+numpy==2.5.1
+requests==2.34.2
+streamlit==1.60.0
+pytest==9.1.1
