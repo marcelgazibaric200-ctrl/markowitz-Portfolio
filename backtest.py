@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 import config
+import metrics
 import optimize
 
 STRATEGIES = ["Max Sharpe", "Min Vol", "HRP", "Equal-Weight", "Buy&Hold BTC"]
@@ -53,12 +54,15 @@ def walk_forward(
     rebalance_days: int = 30,
     frequency: int | None = None,
     risk_free_rate: float | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """Run the walk-forward backtest.
 
-    Returns (curves, stats): `curves` is the growth of $1 per strategy over the
-    out-of-sample period (all starting at 1.0), `stats` holds annualized return,
-    volatility, Sharpe, max drawdown and the final value per strategy.
+    Returns (curves, stats, dsr_info): `curves` is the growth of $1 per strategy
+    over the out-of-sample period (all starting at 1.0), `stats` holds annualized
+    return, volatility, Sharpe, max drawdown, final value and the Probabilistic
+    Sharpe Ratio per strategy, and `dsr_info` reports the best strategy plus its
+    Deflated Sharpe Ratio (Sharpe significance after accounting for having tried
+    several strategies).
     """
     rf = config.RISK_FREE_RATE if risk_free_rate is None else risk_free_rate
     aligned = optimize.align_prices(prices)
@@ -90,8 +94,21 @@ def walk_forward(
     returns_df = returns_df.sort_index()
     curves = (1.0 + returns_df).cumprod()
 
-    stats = _stats(returns_df.drop(index=anchor), curves, frequency, rf)
-    return curves, stats
+    oos = returns_df.drop(index=anchor)
+    stats = _stats(oos, curves, frequency, rf)
+    dsr_info = _deflated_sharpe(oos)
+    return curves, stats, dsr_info
+
+
+def _deflated_sharpe(oos: pd.DataFrame) -> dict:
+    """Best strategy by per-period Sharpe and its Deflated Sharpe Ratio."""
+    per_period = {
+        s: (oos[s].mean() / oos[s].std(ddof=1) if oos[s].std(ddof=1) > 0 else float("nan"))
+        for s in oos.columns
+    }
+    best = max(per_period, key=lambda s: (per_period[s] if np.isfinite(per_period[s]) else -np.inf))
+    dsr = metrics.deflated_sharpe_ratio(list(per_period.values()), oos[best].values)
+    return {"best": best, "dsr": dsr, "sharpe": per_period[best]}
 
 
 def _stats(
@@ -118,6 +135,7 @@ def _stats(
                 "Sharpe": sharpe,
                 "Max Drawdown": max_drawdown,
                 "Endwert": float(curves[strategy].iloc[-1]),
+                "PSR": metrics.probabilistic_sharpe_ratio(r),
             }
         )
     return pd.DataFrame(rows)

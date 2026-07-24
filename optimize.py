@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import scipy.cluster.hierarchy as _sch
+from scipy.optimize import minimize
 from pypfopt import (
     EfficientCVaR,
     EfficientFrontier,
@@ -69,6 +70,8 @@ class OptimizeResult:
     min_cvar_error: str | None = None
     min_semivariance: PortfolioResult | None = None
     min_semivariance_error: str | None = None
+    erc: PortfolioResult | None = None
+    erc_error: str | None = None
     cov_method: str = "ledoit_wolf"
     return_method: str = "mean_historical"
     denoise: bool = False
@@ -305,6 +308,40 @@ def min_semivariance(
     )
 
 
+def equal_risk_contribution(mu: pd.Series, cov: pd.DataFrame) -> PortfolioResult:
+    """Equal Risk Contribution (ERC / true risk parity) portfolio.
+
+    Every asset contributes the same share of portfolio risk. Solves the convex
+    log-barrier formulation (Maillard/Spinu) min 0.5 w'Sigma w - (1/n) sum ln(w),
+    whose stationarity condition w_i (Sigma w)_i = const equalizes the risk
+    contributions; the solution is then normalized to sum to 1. Unconstrained by
+    design (like HRP).
+    """
+    sigma = cov.values
+    n = sigma.shape[0]
+    inv_vol = 1.0 / np.sqrt(np.diag(sigma))
+    x0 = inv_vol / inv_vol.sum()
+
+    def objective(w):
+        return 0.5 * w @ sigma @ w - np.sum(np.log(w)) / n
+
+    def gradient(w):
+        return sigma @ w - 1.0 / (n * w)
+
+    res = minimize(
+        objective,
+        x0,
+        jac=gradient,
+        method="SLSQP",
+        bounds=[(1e-8, None)] * n,
+        options={"maxiter": 500, "ftol": 1e-12},
+    )
+    w = res.x / res.x.sum()
+    weights = {t: float(wi) for t, wi in zip(cov.columns, w)}
+    ret, vol, sharpe = performance_of(weights, mu, cov)
+    return PortfolioResult("ERC", weights, ret, vol, sharpe)
+
+
 def run(
     prices: pd.DataFrame | None = None,
     frequency: int | None = None,
@@ -378,6 +415,10 @@ def run(
         )
     except (ValueError, OptimizationError) as exc:
         result.min_semivariance_error = str(exc)
+    try:
+        result.erc = equal_risk_contribution(mu, cov)
+    except (ValueError, OptimizationError) as exc:
+        result.erc_error = str(exc)
     return result
 
 

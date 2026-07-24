@@ -151,9 +151,32 @@ def test_weights_bar_includes_cvar_and_semivariance():
 def test_backtest_curves_figure():
     import backtest
 
-    curves, _ = backtest.walk_forward(
+    curves, _, _ = backtest.walk_forward(
         _synthetic_prices(), lookback_days=120, rebalance_days=30, frequency=365
     )
     fig = plot.build_backtest_curves(curves)
     assert isinstance(fig, go.Figure)
     assert len(fig.data) == len(curves.columns)
+
+
+def test_weights_bar_and_frontier_include_erc():
+    result = _synthetic_result()
+    assert "ERC" in [t.name for t in plot.build_weights_bar(result).data]
+    assert "ERC" in [t.name for t in plot.build_frontier_montecarlo(result, n_portfolios=100).data]
+
+
+def test_forward_fanchart_and_pca_and_regime_figures():
+    import metrics
+
+    prices = _synthetic_prices()
+    sim = metrics.forward_simulation(
+        prices, {"AAA": 0.4, "BBB": 0.3, "CCC": 0.3}, horizon_days=60, n_paths=500
+    )
+    assert isinstance(plot.build_forward_fanchart(sim["bands"]), go.Figure)
+    assert isinstance(plot.build_pca_scree(metrics.pca_risk(prices)), go.Figure)
+
+    labels = metrics.detect_regimes(prices)
+    assert isinstance(plot.build_regime_timeline(prices, labels), go.Figure)
+    corrs = metrics.regime_correlations(prices, labels)
+    fig = plot.build_regime_correlations(corrs)
+    assert len([t for t in fig.data if t.type == "heatmap"]) == len(corrs)

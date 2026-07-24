@@ -43,4 +43,4 @@ def test_app_renders_without_exception(tmp_path, monkeypatch):
     at = AppTest.from_file(APP_PATH, default_timeout=120).run()
 
     assert not at.exception
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6

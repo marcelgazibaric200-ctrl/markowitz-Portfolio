@@ -223,3 +223,20 @@ def test_allocate_capital_whole_shares_and_leftover():
     # Crypto is fractional.
     assert abs(by_ticker["BTC-USD"]["units"] - (5000.0 / 60000.0)) < 1e-9
     assert leftover >= -1e-9
+
+
+def test_erc_equalizes_risk_contributions():
+    prices = _synthetic_prices()
+    mu, cov, _ = optimize.compute_inputs(prices, frequency=365)
+    erc = optimize.equal_risk_contribution(mu, cov)
+
+    assert abs(sum(erc.weights.values()) - 1.0) < 1e-6
+    assert all(w >= -1e-9 for w in erc.weights.values())
+    contrib = optimize.risk_contributions(erc.weights, cov)
+    # Every asset carries the same share of risk (1/n).
+    assert np.std(list(contrib.values())) < 1e-4
+
+
+def test_run_populates_erc():
+    result = optimize.run(_synthetic_prices())
+    assert result.erc is not None

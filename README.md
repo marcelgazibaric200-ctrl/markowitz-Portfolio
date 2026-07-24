@@ -42,18 +42,26 @@ A dark dashboard where you can:
 - Refresh all prices for the selected portfolio with one button.
 - Explore a quantitative dashboard organised in tabs:
   - **Frontier & Gewichte**: efficient frontier with a Monte Carlo cloud coloured
-    by Sharpe, the **Capital Market Line**, five allocations (Max Sharpe, Min
-    Volatility, **HRP**, **Min CVaR**, **Min Semivariance**) and your current
-    holdings marked on it, a weights bar and a comparison table (CSV export).
+    by Sharpe, the **Capital Market Line**, six allocations (Max Sharpe, Min
+    Volatility, **HRP**, **Min CVaR**, **Min Semivariance**, **ERC** / equal risk
+    contribution) and your current holdings marked on it, a weights bar and a
+    comparison table (CSV export).
   - **Korrelation**: correlation heatmap, a **dendrogram** (the same clustering
-    HRP uses), rolling correlation to BTC over time, and a correlation network.
-  - **Risiko**: weight vs. risk contribution per asset, and downside metrics
-    (Sortino, max drawdown, 95% VaR/CVaR).
+    HRP uses), rolling correlation to BTC over time, a correlation network, and a
+    **volatility-regime** analysis (Gaussian mixture) with calm-vs-stress
+    correlation heatmaps.
+  - **Risiko**: weight vs. risk contribution per asset, downside metrics
+    (Sortino, max drawdown, 95% VaR/CVaR), and a **PCA factor decomposition**
+    (scree plot + effective number of bets).
   - **Rebalancing**: for a chosen target portfolio, how much to buy/sell per asset
     in USD and coins to reach the optimal weights (CSV export), plus a
     discrete-allocation planner for investing fresh capital.
   - **Backtest**: walk-forward out-of-sample test of the optimizers against
-    equal-weight and buy & hold BTC, with growth curves and a stats table.
+    equal-weight and buy & hold BTC, with growth curves and a stats table that
+    includes the **Probabilistic Sharpe Ratio** and a **Deflated Sharpe Ratio**
+    for the best strategy (is the result real or luck?).
+  - **Simulation**: forward Monte-Carlo of a chosen portfolio (bootstrapped daily
+    returns) with a percentile fan chart, probability of loss and horizon CVaR.
 
 The UI is built for a keyboard without arrow keys: typeable number fields,
 buttons, tabs and an editable table — no sliders.
@@ -99,7 +107,12 @@ from `yfinance` (`fetch/stocks.py`).
   (annual CVaR / semi-deviation) is shown in the comparison table.
 - The backtest is walk-forward (rolling re-optimization on a trailing window, held
   out of sample) — no lookahead. Buy & hold BTC and equal weight are the honest
-  benchmarks.
+  benchmarks. The Probabilistic/Deflated Sharpe Ratio (Lopez de Prado) then tests
+  whether the best Sharpe is statistically real given the track length, the
+  non-normality of returns, and the number of strategies tried.
+- ERC (equal risk contribution) and the analytics live in `metrics.py`
+  (`probabilistic_sharpe_ratio`, `deflated_sharpe_ratio`, `forward_simulation`,
+  `detect_regimes`, `pca_risk`); the backtest is in `backtest.py`.
 
 ## Tests
 

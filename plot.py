@@ -12,6 +12,7 @@ import plotly.figure_factory as ff
 import plotly.graph_objects as go
 import scipy.cluster.hierarchy as sch
 import scipy.spatial.distance as ssd
+from plotly.subplots import make_subplots
 
 import config
 import optimize
@@ -163,6 +164,9 @@ _RISK_COLOR = "#f85149"
 _CVAR_COLOR = "#3fb950"
 _SEMI_COLOR = "#ff9e64"
 _CML_COLOR = "#8b949e"
+_ERC_COLOR = "#e3b341"
+_CALM_COLOR = "#3fb950"
+_STRESS_COLOR = "#f85149"
 
 
 def _dark_layout(fig: go.Figure, title: str, **kwargs) -> None:
@@ -265,6 +269,7 @@ def build_frontier_montecarlo(
     for portfolio, color, symbol in (
         (result.min_cvar, _CVAR_COLOR, "x-thin"),
         (result.min_semivariance, _SEMI_COLOR, "square"),
+        (result.erc, _ERC_COLOR, "pentagon"),
     ):
         if portfolio is not None:
             fig.add_trace(
@@ -388,6 +393,7 @@ def build_weights_bar(result: OptimizeResult) -> go.Figure:
         (result.hrp, _HRP_COLOR),
         (result.min_cvar, _CVAR_COLOR),
         (result.min_semivariance, _SEMI_COLOR),
+        (result.erc, _ERC_COLOR),
     ):
         if portfolio is not None:
             fig.add_trace(
@@ -563,5 +569,97 @@ def build_backtest_curves(curves) -> go.Figure:
         "Out-of-Sample Backtest (Growth of $1)",
         xaxis_title="Date",
         yaxis_title="Portfolio value (start = 1)",
+    )
+    return fig
+
+
+def build_forward_fanchart(bands) -> go.Figure:
+    """Fan chart of simulated forward portfolio paths (percentile bands)."""
+    x = list(bands.index)
+    fig = go.Figure()
+    # Outer band 5-95, inner band 25-75, both as filled areas, plus the median.
+    for lo, hi, color in (("p5", "p95", "rgba(88,166,255,0.15)"), ("p25", "p75", "rgba(88,166,255,0.30)")):
+        fig.add_trace(go.Scatter(x=x, y=bands[hi], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=bands[lo], mode="lines", line=dict(width=0), fill="tonexty",
+                fillcolor=color, name=f"{lo[1:]}-{hi[1:]}%", hoverinfo="skip",
+            )
+        )
+    fig.add_trace(
+        go.Scatter(x=x, y=bands["p50"], mode="lines", name="Median", line=dict(color="#58a6ff", width=2))
+    )
+    _dark_layout(
+        fig,
+        "Forward Simulation (Growth of $1)",
+        xaxis_title="Days ahead",
+        yaxis_title="Portfolio value (start = 1)",
+    )
+    return fig
+
+
+def build_regime_correlations(corrs: dict) -> go.Figure:
+    """Side-by-side correlation heatmaps per market regime (e.g. Calm vs Stress)."""
+    labels_order = [k for k in ("Calm", "Stress") if k in corrs] or list(corrs)
+    fig = make_subplots(rows=1, cols=len(labels_order), subplot_titles=labels_order)
+    for i, label in enumerate(labels_order, start=1):
+        corr = corrs[label]
+        fig.add_trace(
+            go.Heatmap(
+                z=corr.values, x=list(corr.columns), y=list(corr.columns),
+                zmin=-1, zmax=1, colorscale="Viridis", showscale=(i == len(labels_order)),
+                colorbar=dict(title="rho"),
+            ),
+            row=1, col=i,
+        )
+        fig.update_yaxes(autorange="reversed", row=1, col=i)
+    _dark_layout(fig, "Correlation by Regime")
+    return fig
+
+
+def build_regime_timeline(prices, labels) -> go.Figure:
+    """Market-proxy price over time with points coloured by volatility regime."""
+    aligned = optimize.align_prices(prices)
+    if "BTC-USD" in aligned.columns:
+        proxy = aligned["BTC-USD"]
+    else:
+        proxy = (aligned / aligned.iloc[0]).mean(axis=1)
+    common = proxy.index.intersection(labels.index)
+    proxy = proxy.loc[common]
+    proxy = proxy / proxy.iloc[0] * 100
+    regimes = labels.loc[common]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(x=proxy.index, y=proxy.values, mode="lines", name="Market proxy",
+                   line=dict(color="#8b949e", width=1))
+    )
+    for label, color in (("Calm", _CALM_COLOR), ("Stress", _STRESS_COLOR)):
+        mask = regimes == label
+        if mask.any():
+            fig.add_trace(
+                go.Scatter(x=proxy.index[mask], y=proxy.values[mask], mode="markers",
+                           name=label, marker=dict(color=color, size=5))
+            )
+    _dark_layout(fig, "Volatility Regimes", xaxis_title="Date", yaxis_title="Proxy (start = 100)")
+    return fig
+
+
+def build_pca_scree(pca: dict) -> go.Figure:
+    """Explained variance per principal component with a cumulative line."""
+    n = len(pca["explained"])
+    x = [f"PC{i + 1}" for i in range(n)]
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(x=x, y=pca["explained"] * 100, name="Explained %", marker_color=_MIN_VOL_COLOR)
+    )
+    fig.add_trace(
+        go.Scatter(x=x, y=pca["cumulative"] * 100, name="Cumulative %", mode="lines+markers",
+                   line=dict(color="#f0883e", width=2))
+    )
+    _dark_layout(
+        fig,
+        f"PCA Scree  (effective bets: {pca['effective_bets']:.2f})",
+        yaxis_title="Variance explained (%)",
     )
     return fig

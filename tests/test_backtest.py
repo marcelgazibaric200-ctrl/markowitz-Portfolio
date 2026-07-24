@@ -18,16 +18,21 @@ def _synthetic_prices(days: int = 320, seed: int = 4) -> pd.DataFrame:
 
 
 def test_walk_forward_returns_all_strategies():
-    curves, stats = backtest.walk_forward(
+    curves, stats, dsr_info = backtest.walk_forward(
         _synthetic_prices(), lookback_days=150, rebalance_days=30, frequency=365
     )
     assert list(curves.columns) == backtest.STRATEGIES
     assert set(stats["Strategie"]) == set(backtest.STRATEGIES)
     assert len(curves) > 1
+    # PSR column and Deflated Sharpe info.
+    assert "PSR" in stats.columns
+    assert all(0.0 <= p <= 1.0 for p in stats["PSR"])
+    assert dsr_info["best"] in backtest.STRATEGIES
+    assert 0.0 <= dsr_info["dsr"] <= 1.0
 
 
 def test_walk_forward_curves_start_at_one():
-    curves, _ = backtest.walk_forward(
+    curves, _, _ = backtest.walk_forward(
         _synthetic_prices(), lookback_days=150, rebalance_days=30, frequency=365
     )
     for column in curves.columns:
@@ -36,7 +41,7 @@ def test_walk_forward_curves_start_at_one():
 
 def test_buy_and_hold_btc_matches_btc_path():
     prices = _synthetic_prices()
-    curves, _ = backtest.walk_forward(
+    curves, _, _ = backtest.walk_forward(
         prices, lookback_days=150, rebalance_days=30, frequency=365
     )
     # Buy&Hold BTC should track BTC's own normalized price over the OOS window.

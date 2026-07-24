@@ -21,6 +21,7 @@ import analysis
 import backtest
 import config
 import db
+import metrics
 import optimize
 import plot
 from fetch import coingecko
@@ -89,7 +90,44 @@ def compute_analysis(
     }
     primary = result.max_sharpe or result.min_volatility
     downside = optimize.downside_metrics(prices, primary.weights, freq, rf)
-    return result, figures, downside
+
+    # Regime analysis (needs enough history) and PCA factor decomposition.
+    extras: dict = {"pca": None, "regime_counts": None}
+    figures["regime_timeline"] = None
+    figures["regime_corr"] = None
+    try:
+        labels = metrics.detect_regimes(prices)
+        regime_corr = metrics.regime_correlations(prices, labels)
+        figures["regime_timeline"] = plot.build_regime_timeline(prices, labels)
+        if regime_corr:
+            figures["regime_corr"] = plot.build_regime_correlations(regime_corr)
+        extras["regime_counts"] = dict(labels.value_counts())
+    except Exception:  # noqa: BLE001 - regime detection is best-effort
+        pass
+    if len(tickers) >= 2:
+        pca = metrics.pca_risk(prices)
+        figures["pca"] = plot.build_pca_scree(pca)
+        extras["pca"] = pca
+    else:
+        figures["pca"] = None
+    return result, figures, downside, extras
+
+
+@st.cache_data(show_spinner=False)
+def run_forward_sim(
+    tickers: tuple[str, ...],
+    weights_items: tuple[tuple[str, float], ...],
+    horizon_days: int,
+    n_paths: int,
+    data_version: int,
+):
+    """Forward Monte-Carlo simulation of a weight vector, cached by inputs."""
+    conn = db.connect(check_same_thread=False)
+    prices = db.load_prices(conn, tickers=list(tickers))
+    conn.close()
+    if prices.empty:
+        return None
+    return metrics.forward_simulation(prices, dict(weights_items), horizon_days, n_paths)
 
 
 @st.cache_data(show_spinner=False)
@@ -137,6 +175,7 @@ def portfolio_comparison(result) -> pd.DataFrame:
         result.hrp,
         result.min_cvar,
         result.min_semivariance,
+        result.erc,
     ):
         if portfolio is None:
             continue
@@ -380,7 +419,7 @@ else:
     if outcome is None:
         st.info("Noch keine Preisdaten. Klick Aktualisieren in der Seitenleiste.")
     else:
-        result, figures, downside = outcome
+        result, figures, downside, extras = outcome
 
         if result.max_sharpe is None:
             st.caption(
@@ -388,8 +427,9 @@ else:
                 "Caps zu eng). Kennzahlen unten beziehen sich auf Min Volatility."
             )
 
-        tab_front, tab_corr, tab_risk, tab_rebal, tab_bt = st.tabs(
-            ["Frontier & Gewichte", "Korrelation", "Risiko", "Rebalancing", "Backtest"]
+        tab_front, tab_corr, tab_risk, tab_rebal, tab_bt, tab_sim = st.tabs(
+            ["Frontier & Gewichte", "Korrelation", "Risiko", "Rebalancing",
+             "Backtest", "Simulation"]
         )
 
         with tab_front:
@@ -414,6 +454,15 @@ else:
             c3.plotly_chart(figures["rolling"], width="stretch")
             c4.plotly_chart(figures["network"], width="stretch")
 
+            if figures.get("regime_timeline") is not None:
+                st.markdown("**Volatilitaets-Regime** (via Gaussian Mixture)")
+                if extras.get("regime_counts"):
+                    counts = ", ".join(f"{k}: {v} Tage" for k, v in extras["regime_counts"].items())
+                    st.caption(counts + " — Korrelationen steigen typisch im Stress.")
+                st.plotly_chart(figures["regime_timeline"], width="stretch")
+                if figures.get("regime_corr") is not None:
+                    st.plotly_chart(figures["regime_corr"], width="stretch")
+
         with tab_risk:
             st.plotly_chart(figures["risk"], width="stretch")
             st.markdown("**Downside-Metriken** (Portfolio Max Sharpe / Min Vol)")
@@ -422,6 +471,18 @@ else:
             d2.metric("Max Drawdown", analysis.fmt_pct(downside["max_drawdown"]))
             d3.metric("VaR 95% (Tag)", analysis.fmt_pct(downside["var95"]))
             d4.metric("CVaR 95% (Tag)", analysis.fmt_pct(downside["cvar95"]))
+
+            if figures.get("pca") is not None:
+                st.divider()
+                st.markdown("**Faktor-Risikozerlegung (PCA)**")
+                pca = extras["pca"]
+                p1, p2 = st.columns([1, 3])
+                p1.metric("Effektive Wetten", analysis._de(pca["effective_bets"], 2))
+                p1.caption(
+                    f"von {len(pca['labels'])} Assets — wie viele wirklich "
+                    "unabhaengige Risikoquellen im Portfolio stecken."
+                )
+                p2.plotly_chart(figures["pca"], width="stretch")
 
         with tab_rebal:
             options = {
@@ -432,6 +493,7 @@ else:
                     result.hrp,
                     result.min_cvar,
                     result.min_semivariance,
+                    result.erc,
                 )
                 if p is not None
             }
@@ -519,7 +581,7 @@ else:
 
             bt_outcome = st.session_state.get("backtest_result")
             if bt_outcome is not None:
-                curves, stats = bt_outcome
+                curves, stats, dsr_info = bt_outcome
                 st.plotly_chart(plot.build_backtest_curves(curves), width="stretch")
                 disp = pd.DataFrame(
                     {
@@ -531,6 +593,62 @@ else:
                         "Sharpe": stats["Sharpe"].map(lambda v: analysis._de(v, 2)),
                         "Max Drawdown": stats["Max Drawdown"].map(analysis.fmt_pct),
                         "Endwert": stats["Endwert"].map(lambda v: analysis._de(v, 2)),
+                        "PSR": stats["PSR"].map(analysis.fmt_pct),
                     }
                 )
                 st.dataframe(disp, hide_index=True, width="stretch")
+                st.caption(
+                    f"PSR = Wahrscheinlichkeit, dass der wahre Sharpe > 0 ist. "
+                    f"Beste Strategie **{dsr_info['best']}**: Deflated Sharpe "
+                    f"{analysis.fmt_pct(dsr_info['dsr'])} (nach Korrektur dafuer, dass "
+                    f"{len(backtest.STRATEGIES)} Strategien getestet wurden). "
+                    "Nahe 100% = wahrscheinlich echt, nicht Glueck."
+                )
+
+        with tab_sim:
+            st.markdown(
+                "Forward Monte-Carlo: bootstrappt die historischen Tagesrenditen des "
+                "gewaehlten Portfolios in die Zukunft (Faecher = Perzentil-Baender)."
+            )
+            sim_options = {
+                p.name: p
+                for p in (
+                    result.max_sharpe,
+                    result.min_volatility,
+                    result.hrp,
+                    result.min_cvar,
+                    result.min_semivariance,
+                    result.erc,
+                )
+                if p is not None
+            }
+            if current_weights:
+                sim_options = {"Aktuell": None, **sim_options}
+            sim_choice = st.radio(
+                "Portfolio", list(sim_options.keys()), horizontal=True, key="sim_choice"
+            )
+            sim_weights = (
+                current_weights
+                if sim_choice == "Aktuell"
+                else sim_options[sim_choice].weights
+            )
+            s1, s2 = st.columns(2)
+            horizon = int(
+                s1.number_input("Horizont (Tage)", value=252, min_value=10, step=10, key="sim_h")
+            )
+            n_paths = int(
+                s2.number_input("Pfade", value=5000, min_value=500, step=500, key="sim_n")
+            )
+            if st.button("Simulieren", type="primary"):
+                st.session_state.sim_result = run_forward_sim(
+                    tuple(tickers), tuple(sorted(sim_weights.items())), horizon, n_paths,
+                    st.session_state.data_version,
+                )
+
+            sim = st.session_state.get("sim_result")
+            if sim is not None:
+                st.plotly_chart(plot.build_forward_fanchart(sim["bands"]), width="stretch")
+                q1, q2, q3 = st.columns(3)
+                q1.metric("P(Verlust)", analysis.fmt_pct(sim["p_loss"]))
+                q2.metric("Median-Endwert", f"{analysis._de(sim['median_terminal'], 2)}x")
+                q3.metric("CVaR 5% (Endwert)", f"{analysis._de(sim['cvar5_terminal'], 2)}x")
